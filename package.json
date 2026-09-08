@@ -2,29 +2,16 @@
   "name": "pixel-studio",
   "version": "0.1.0",
   "private": true,
+  "description": "Pixel Studio monorepo: visual design editor (web), API (api) and shared design types.",
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint",
-    "test": "vitest run",
-    "test:watch": "vitest"
-  },
-  "dependencies": {
-    "next": "16.3.4",
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
-  },
-  "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.3.4",
-    "tailwindcss": "^4",
-    "typescript": "^5",
-    "vitest": "^5.0.0"
-  },
-  "packageManager": "pnpm@10.33.0"
+    "dev:web": "pnpm --filter @pixel-studio/web dev",
+    "dev:api": "pnpm --filter @pixel-studio/api start:dev",
+    "build": "pnpm --recursive build",
+    "build:web": "pnpm --filter @pixel-studio/web build",
+    "build:api": "pnpm --filter @pixel-studio/api build",
+    "lint": "pnpm --recursive lint",
+    "test": "pnpm --recursive test",
+    "typecheck": "pnpm --recursive typecheck"
+  }
 }
