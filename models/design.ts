@@ -1,88 +1,40 @@
 /**
- * Design document model.
+ * The design document: a tree of elements plus the helpers that read and update
+ * it immutably. This module is the single source of truth for design data and
+ * stays free of React, canvas and editor concerns.
  *
- * This module is intentionally free of React and canvas code: everything here is
- * plain, serializable data so a document can be persisted (e.g. to a database)
- * and restored later with `JSON.parse`.
+ * Everything here is plain serializable JSON so a document can be persisted and
+ * restored with `JSON.parse` when storage arrives in a later milestone.
  */
+
+import {
+  MIN_ELEMENT_SIZE,
+  childrenOf,
+  createId,
+  isContainer,
+  withChildren,
+  type CropRect,
+  type DesignElement,
+  type ShapeGeometry,
+} from "@/models/elements";
+import {
+  createSolidFill,
+  type Border,
+  type Fill,
+  type Shadow,
+  type TextStyle,
+} from "@/models/styles";
 
 export const DESIGN_WIDTH = 1080;
 export const DESIGN_HEIGHT = 1080;
-
-/** Smallest allowed element size, in design units. */
-export const MIN_ELEMENT_SIZE = 10;
-
-export type ElementType = "rectangle" | "text";
-
-export type TextAlign = "left" | "center" | "right";
-
-/** Geometry and presentation shared by every element. */
-export interface BaseElement {
-  readonly id: string;
-  readonly type: ElementType;
-  /** Top-left corner of the unrotated bounding box, in design units. */
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  /** Clockwise rotation around the element centre, in degrees. */
-  rotation: number;
-  /** 0..1 */
-  opacity: number;
-}
-
-export interface RectangleElement extends BaseElement {
-  readonly type: "rectangle";
-  fill: string;
-}
-
-export interface TextElement extends BaseElement {
-  readonly type: "text";
-  text: string;
-  fontSize: number;
-  fontFamily: string;
-  color: string;
-  align: TextAlign;
-}
-
-export type DesignElement = RectangleElement | TextElement;
 
 export interface DesignDocument {
   readonly id: string;
   name: string;
   width: number;
   height: number;
-  /** CSS colour of the artboard. */
-  background: string;
-  /** Painted back-to-front: the last element is on top. */
+  background: Fill;
   elements: DesignElement[];
-}
-
-/**
- * A partial update for an element. Keys are shared across element types by
- * name, never by meaning, so a patch can be applied without knowing the type.
- */
-export interface ElementPatch {
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  rotation?: number;
-  opacity?: number;
-  fill?: string;
-  text?: string;
-  fontSize?: number;
-  fontFamily?: string;
-  color?: string;
-  align?: TextAlign;
-}
-
-let idCounter = 0;
-
-/** Stable, collision-free id. Not a UUID: ids only need to be unique per document. */
-export function createId(prefix: string): string {
-  idCounter += 1;
-  return `${prefix}_${Date.now().toString(36)}_${idCounter.toString(36)}`;
 }
 
 export function createDocument(): DesignDocument {
@@ -91,41 +43,49 @@ export function createDocument(): DesignDocument {
     name: "Untitled design",
     width: DESIGN_WIDTH,
     height: DESIGN_HEIGHT,
-    background: "#ffffff",
+    background: createSolidFill("#ffffff"),
     elements: [],
   };
 }
 
-export function createRectangle(x: number, y: number): RectangleElement {
-  return {
-    id: createId("rect"),
-    type: "rectangle",
-    x,
-    y,
-    width: 320,
-    height: 220,
-    rotation: 0,
-    opacity: 1,
-    fill: "#4f46e5",
-  };
+/* ------------------------------------------------------------------ *
+ * Reading the tree
+ * ------------------------------------------------------------------ */
+
+/** Where an element sits in the tree. `parentId` is null at the top level. */
+export interface ElementLocation {
+  element: DesignElement;
+  parentId: string | null;
+  index: number;
+  /** Outermost first, excluding the element itself. */
+  ancestors: DesignElement[];
 }
 
-export function createText(x: number, y: number): TextElement {
-  return {
-    id: createId("text"),
-    type: "text",
-    x,
-    y,
-    width: 420,
-    height: 90,
-    rotation: 0,
-    opacity: 1,
-    text: "Hello World",
-    fontSize: 64,
-    fontFamily: "system-ui, sans-serif",
-    color: "#111827",
-    align: "left",
-  };
+export function locateElement(
+  doc: DesignDocument,
+  id: string,
+): ElementLocation | null {
+  return locateIn(doc.elements, id, null, []);
+}
+
+function locateIn(
+  elements: readonly DesignElement[],
+  id: string,
+  parentId: string | null,
+  ancestors: DesignElement[],
+): ElementLocation | null {
+  for (let index = 0; index < elements.length; index += 1) {
+    const element = elements[index];
+    if (element.id === id) return { element, parentId, index, ancestors };
+    if (isContainer(element)) {
+      const found = locateIn(element.children, id, element.id, [
+        ...ancestors,
+        element,
+      ]);
+      if (found) return found;
+    }
+  }
+  return null;
 }
 
 export function findElement(
@@ -133,86 +93,129 @@ export function findElement(
   id: string | null,
 ): DesignElement | null {
   if (id === null) return null;
-  return doc.elements.find((element) => element.id === id) ?? null;
+  return locateElement(doc, id)?.element ?? null;
 }
 
-function clampOpacity(value: number): number {
-  return Math.min(1, Math.max(0, value));
+/** The children list an element belongs to. */
+export function siblingsOf(
+  doc: DesignDocument,
+  parentId: string | null,
+): DesignElement[] {
+  if (parentId === null) return doc.elements;
+  const parent = findElement(doc, parentId);
+  return parent ? childrenOf(parent) : [];
 }
 
-function clampSize(value: number): number {
-  return Math.max(MIN_ELEMENT_SIZE, value);
-}
-
-/** Returns a new element with the patch applied; the input is not mutated. */
-export function applyPatch(
-  element: DesignElement,
-  patch: ElementPatch,
-): DesignElement {
-  const base = {
-    x: patch.x ?? element.x,
-    y: patch.y ?? element.y,
-    width: clampSize(patch.width ?? element.width),
-    height: clampSize(patch.height ?? element.height),
-    rotation: patch.rotation ?? element.rotation,
-    opacity: clampOpacity(patch.opacity ?? element.opacity),
-  };
-
-  switch (element.type) {
-    case "rectangle":
-      return { ...element, ...base, fill: patch.fill ?? element.fill };
-    case "text":
-      return {
-        ...element,
-        ...base,
-        text: patch.text ?? element.text,
-        fontSize: patch.fontSize ?? element.fontSize,
-        fontFamily: patch.fontFamily ?? element.fontFamily,
-        color: patch.color ?? element.color,
-        align: patch.align ?? element.align,
-      };
+/** Depth-first walk over the whole tree, containers before their children. */
+export function walkElements(
+  elements: readonly DesignElement[],
+  visit: (element: DesignElement, parentId: string | null) => void,
+  parentId: string | null = null,
+): void {
+  for (const element of elements) {
+    visit(element, parentId);
+    if (isContainer(element)) {
+      walkElements(element.children, visit, element.id);
+    }
   }
 }
 
-export function addElement(
-  doc: DesignDocument,
-  element: DesignElement,
-): DesignDocument {
-  return { ...doc, elements: [...doc.elements, element] };
+export function flattenElements(doc: DesignDocument): DesignElement[] {
+  const all: DesignElement[] = [];
+  walkElements(doc.elements, (element) => all.push(element));
+  return all;
 }
 
-/** Inserts at a specific z-index; used when undoing a delete. */
+/** Ids of `element` and everything beneath it. */
+export function subtreeIds(element: DesignElement): string[] {
+  const ids = [element.id];
+  walkElements(childrenOf(element), (child) => ids.push(child.id));
+  return ids;
+}
+
+/* ------------------------------------------------------------------ *
+ * Updating the tree
+ * ------------------------------------------------------------------ */
+
+/** Rebuilds the children list of `parentId` (or the root) with `mapper`. */
+function mapChildList(
+  doc: DesignDocument,
+  parentId: string | null,
+  mapper: (children: DesignElement[]) => DesignElement[],
+): DesignDocument {
+  if (parentId === null) {
+    return { ...doc, elements: mapper(doc.elements) };
+  }
+  return {
+    ...doc,
+    elements: mapTree(doc.elements, (element) =>
+      element.id === parentId && isContainer(element)
+        ? withChildren(element, mapper(element.children))
+        : element,
+    ),
+  };
+}
+
+/** Applies `mapper` to every node, rebuilding only the branches that change. */
+function mapTree(
+  elements: readonly DesignElement[],
+  mapper: (element: DesignElement) => DesignElement,
+): DesignElement[] {
+  return elements.map((element) => {
+    const mapped = mapper(element);
+    if (!isContainer(mapped)) return mapped;
+    const children = mapTree(mapped.children, mapper);
+    return children === mapped.children
+      ? mapped
+      : withChildren(mapped, children);
+  });
+}
+
 export function insertElement(
   doc: DesignDocument,
-  element: DesignElement,
+  parentId: string | null,
   index: number,
+  element: DesignElement,
 ): DesignDocument {
-  const elements = [...doc.elements];
-  elements.splice(Math.min(Math.max(index, 0), elements.length), 0, element);
-  return { ...doc, elements };
+  return mapChildList(doc, parentId, (children) => {
+    const next = [...children];
+    next.splice(Math.min(Math.max(index, 0), next.length), 0, element);
+    return next;
+  });
 }
 
-export function indexOfElement(doc: DesignDocument, id: string): number {
-  return doc.elements.findIndex((element) => element.id === id);
+export function removeElement(
+  doc: DesignDocument,
+  id: string,
+): DesignDocument {
+  const location = locateElement(doc, id);
+  if (!location) return doc;
+  return mapChildList(doc, location.parentId, (children) =>
+    children.filter((child) => child.id !== id),
+  );
 }
 
-/** Moves an element to a new z-index. Index 0 is the back of the stack. */
+/** Moves an element to a new index among its current siblings. */
 export function moveElementToIndex(
   doc: DesignDocument,
   id: string,
   index: number,
 ): DesignDocument {
-  const from = indexOfElement(doc, id);
-  if (from === -1) return doc;
-  const elements = [...doc.elements];
-  const [element] = elements.splice(from, 1);
-  elements.splice(Math.min(Math.max(index, 0), elements.length), 0, element);
-  return { ...doc, elements };
+  const location = locateElement(doc, id);
+  if (!location) return doc;
+  return mapChildList(doc, location.parentId, (children) => {
+    const next = [...children];
+    const from = next.findIndex((child) => child.id === id);
+    if (from === -1) return children;
+    const [element] = next.splice(from, 1);
+    next.splice(Math.min(Math.max(index, 0), next.length), 0, element);
+    return next;
+  });
 }
 
 export type LayerDirection = "forward" | "backward" | "front" | "back";
 
-/** Target index for a layer command, or the current index when it is a no-op. */
+/** Target index for a layer command among `count` siblings. */
 export function targetLayerIndex(
   current: number,
   count: number,
@@ -230,23 +233,131 @@ export function targetLayerIndex(
   }
 }
 
-/** Copy of `element` with a fresh id, offset so it does not hide the original. */
-export function cloneElement(
-  element: DesignElement,
-  offset: number,
-): DesignElement {
-  const prefix = element.type === "text" ? "text" : "rect";
+/* ------------------------------------------------------------------ *
+ * Patching elements
+ * ------------------------------------------------------------------ */
+
+/**
+ * A partial update. Keys map one-to-one onto element properties; keys that do
+ * not apply to the target element type are ignored, which lets one patch be
+ * applied across a mixed selection.
+ *
+ * `style` is merged field-by-field (so changing the font size keeps the colour);
+ * every other object-valued key replaces its value wholesale.
+ */
+export interface ElementPatch {
+  name?: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  rotation?: number;
+  opacity?: number;
+  visible?: boolean;
+  locked?: boolean;
+
+  fill?: Fill;
+  border?: Border | null;
+  shadow?: Shadow | null;
+  geometry?: ShapeGeometry;
+  cornerRadius?: number;
+
+  text?: string;
+  style?: Partial<TextStyle>;
+
+  crop?: CropRect;
+  flipX?: boolean;
+  flipY?: boolean;
+
+  clipContent?: boolean;
+}
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+function clampSize(value: number): number {
+  return Math.max(MIN_ELEMENT_SIZE, value);
+}
+
+/** Geometry fields every element shares. */
+function patchBase(element: DesignElement, patch: ElementPatch) {
   return {
-    ...element,
-    id: createId(prefix),
-    x: element.x + offset,
-    y: element.y + offset,
+    name: patch.name ?? element.name,
+    x: patch.x ?? element.x,
+    y: patch.y ?? element.y,
+    // Lines and arrows are allowed to be flat, so only their box is clamped.
+    width: clampSize(patch.width ?? element.width),
+    height: clampSize(patch.height ?? element.height),
+    rotation: patch.rotation ?? element.rotation,
+    opacity: clamp01(patch.opacity ?? element.opacity),
+    visible: patch.visible ?? element.visible,
+    locked: patch.locked ?? element.locked,
   };
 }
 
-/** Label shown in the layers panel. */
-export function elementLabel(element: DesignElement): string {
-  return element.type === "text" ? element.text || "Text" : "Rectangle";
+function mergeTextStyle(
+  style: TextStyle,
+  patch: Partial<TextStyle> | undefined,
+): TextStyle {
+  if (!patch) return style;
+  return {
+    ...style,
+    ...patch,
+    fontSize: Math.max(1, patch.fontSize ?? style.fontSize),
+    lineHeight: Math.max(0.5, patch.lineHeight ?? style.lineHeight),
+  };
+}
+
+/** Returns a new element with the patch applied; the input is not mutated. */
+export function applyPatch(
+  element: DesignElement,
+  patch: ElementPatch,
+): DesignElement {
+  const base = patchBase(element, patch);
+
+  switch (element.type) {
+    case "shape":
+      return {
+        ...element,
+        ...base,
+        geometry: patch.geometry ?? element.geometry,
+        fill: patch.fill ?? element.fill,
+        border: patch.border !== undefined ? patch.border : element.border,
+        shadow: patch.shadow !== undefined ? patch.shadow : element.shadow,
+      };
+    case "text":
+      return {
+        ...element,
+        ...base,
+        text: patch.text ?? element.text,
+        style: mergeTextStyle(element.style, patch.style),
+        shadow: patch.shadow !== undefined ? patch.shadow : element.shadow,
+      };
+    case "image":
+      return {
+        ...element,
+        ...base,
+        crop: patch.crop ?? element.crop,
+        flipX: patch.flipX ?? element.flipX,
+        flipY: patch.flipY ?? element.flipY,
+        cornerRadius: Math.max(0, patch.cornerRadius ?? element.cornerRadius),
+        border: patch.border !== undefined ? patch.border : element.border,
+        shadow: patch.shadow !== undefined ? patch.shadow : element.shadow,
+      };
+    case "group":
+      return { ...element, ...base };
+    case "frame":
+      return {
+        ...element,
+        ...base,
+        fill: patch.fill ?? element.fill,
+        clipContent: patch.clipContent ?? element.clipContent,
+        cornerRadius: Math.max(0, patch.cornerRadius ?? element.cornerRadius),
+        border: patch.border !== undefined ? patch.border : element.border,
+        shadow: patch.shadow !== undefined ? patch.shadow : element.shadow,
+      };
+  }
 }
 
 export function updateElement(
@@ -256,15 +367,8 @@ export function updateElement(
 ): DesignDocument {
   return {
     ...doc,
-    elements: doc.elements.map((element) =>
+    elements: mapTree(doc.elements, (element) =>
       element.id === id ? applyPatch(element, patch) : element,
     ),
-  };
-}
-
-export function removeElement(doc: DesignDocument, id: string): DesignDocument {
-  return {
-    ...doc,
-    elements: doc.elements.filter((element) => element.id !== id),
   };
 }

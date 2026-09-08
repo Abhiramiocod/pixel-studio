@@ -56,16 +56,6 @@ export function screenToDocument(point: Point, camera: Camera): Point {
   };
 }
 
-/** Converts a length: document units -> screen pixels. */
-export function scaleToScreen(length: number, camera: Camera): number {
-  return length * camera.zoom;
-}
-
-/** Converts a length: screen pixels -> document units. */
-export function scaleToDocument(length: number, camera: Camera): number {
-  return length / camera.zoom;
-}
-
 /** Camera that centres the document in the viewport, scaled down to fit. */
 export function createFitCamera(
   viewport: Size,

@@ -1,8 +1,17 @@
 "use client";
 
+/**
+ * The canvas surface.
+ *
+ * This component owns nothing about *what* the design is: it converts pointer
+ * and wheel input into document-space coordinates, asks the engine what a
+ * gesture means, and hands the result to the editor store. Rendering is
+ * delegated to the engine's `renderScene`.
+ */
+
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { DesignDocument } from "@/models/design";
+import type { ShapeKind } from "@/models/elements";
 import type { EditorApi } from "@/editor/useEditor";
 import {
   clientToDocumentPoint,
@@ -12,8 +21,8 @@ import {
   type Point,
   type Size,
 } from "@/engine/coordinates";
-import { renderScene } from "@/engine/renderer";
-import { pickElement } from "@/engine/selection";
+import { renderScene } from "@/engine/rendering/renderer";
+import { pickDeepest, resolveSelection } from "@/engine/selection";
 import { hitTestHandle } from "@/engine/transformations";
 import {
   beginGesture,
@@ -21,9 +30,11 @@ import {
   updateGesture,
   type Gesture,
 } from "@/engine/interactions";
+import { onImageLoaded } from "@/engine/images/imageCache";
 
 interface CanvasStageProps {
   editor: EditorApi;
+  shapeKind: ShapeKind;
 }
 
 /** Identifies one continuous drag so history folds it into a single undo step. */
@@ -31,8 +42,8 @@ let gestureSession = 0;
 
 const MIDDLE_MOUSE_BUTTON = 1;
 
-export function CanvasStage({ editor }: CanvasStageProps) {
-  const { document: doc, selectedIds, camera, tool } = editor.state;
+export function CanvasStage({ editor, shapeKind }: CanvasStageProps) {
+  const { document: doc, selectedIds, camera, tool, guides } = editor.state;
 
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -40,6 +51,7 @@ export function CanvasStage({ editor }: CanvasStageProps) {
   const panRef = useRef<{ origin: Point; camera: Camera } | null>(null);
   const [size, setSize] = useState<Size>({ width: 0, height: 0 });
   const [spaceHeld, setSpaceHeld] = useState(false);
+  const [imageEpoch, setImageEpoch] = useState(0);
 
   const { viewportResized, zoomByFactor, panViewport } = editor;
 
@@ -76,6 +88,9 @@ export function CanvasStage({ editor }: CanvasStageProps) {
     };
   }, []);
 
+  // Images decode asynchronously; repaint when one becomes available.
+  useEffect(() => onImageLoaded(() => setImageEpoch((epoch) => epoch + 1)), []);
+
   // Draw on the next animation frame so bursts of pointer moves coalesce.
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -96,11 +111,12 @@ export function CanvasStage({ editor }: CanvasStageProps) {
         camera,
         size,
         devicePixelRatio: dpr,
+        guides,
       });
     });
 
     return () => cancelAnimationFrame(frame);
-  }, [doc, selectedIds, camera, size]);
+  }, [doc, selectedIds, camera, size, guides, imageEpoch]);
 
   // Wheel: pinch/ctrl zooms about the cursor, everything else pans.
   useEffect(() => {
@@ -110,9 +126,10 @@ export function CanvasStage({ editor }: CanvasStageProps) {
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
       if (event.ctrlKey || event.metaKey) {
+        const rect = canvas.getBoundingClientRect();
         zoomByFactor(Math.exp(-event.deltaY / 300), {
-          x: event.clientX - canvas.getBoundingClientRect().left,
-          y: event.clientY - canvas.getBoundingClientRect().top,
+          x: event.clientX - rect.left,
+          y: event.clientY - rect.top,
         });
       } else {
         panViewport(-event.deltaX, -event.deltaY);
@@ -124,13 +141,29 @@ export function CanvasStage({ editor }: CanvasStageProps) {
   }, [zoomByFactor, panViewport]);
 
   const documentPoint = useCallback(
-    (event: React.PointerEvent<HTMLCanvasElement>): Point | null => {
+    (event: { clientX: number; clientY: number }): Point | null => {
       const canvas = canvasRef.current;
       if (!canvas) return null;
       return clientToDocumentPoint(canvas, event.clientX, event.clientY, camera);
     },
     [camera],
   );
+
+  const insertAt = (point: Point) => {
+    switch (tool) {
+      case "shape":
+        editor.insertShape(shapeKind, point);
+        return true;
+      case "text":
+        editor.insertText(point);
+        return true;
+      case "frame":
+        editor.insertFrame(point);
+        return true;
+      case "select":
+        return false;
+    }
+  };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = event.currentTarget;
@@ -147,45 +180,38 @@ export function CanvasStage({ editor }: CanvasStageProps) {
 
     const point = documentPoint(event);
     if (!point) return;
+    if (insertAt(point)) return;
 
-    if (tool === "rectangle") {
-      editor.insertRectangle(point);
-      return;
-    }
-    if (tool === "text") {
-      editor.insertText(point);
-      return;
-    }
-
-    const selected = editor.selectedElements;
+    const selection = editor.selectedElements;
 
     // A press on the transform handles wins, even outside the element body.
     if (
-      selected.length === 1 &&
-      hitTestHandle(selected[0], point, camera.zoom) !== null
+      selection.length === 1 &&
+      hitTestHandle(doc, selection[0], point, camera.zoom) !== null
     ) {
-      startGesture(selected, point, canvas, event.pointerId);
+      startGesture(selection, point, canvas, event.pointerId);
       return;
     }
 
-    const hit = pickElement(doc.elements, point);
+    const hit = pickDeepest(doc, point, camera.zoom);
     if (!hit) {
       editor.clearSelection();
       return;
     }
 
-    const additive = event.shiftKey;
-    const alreadySelected = selectedIds.includes(hit.id);
+    // A plain click selects the outermost container; a double-click reaches in.
+    const target = resolveSelection(doc, hit, event.detail >= 2);
 
-    if (additive) {
-      editor.selectOne(hit.id, true);
+    if (event.shiftKey) {
+      editor.selectOne(target.id, true);
       return;
     }
-    if (!alreadySelected) editor.selectOne(hit.id);
 
-    // Dragging moves the whole selection when the press lands inside it.
+    const alreadySelected = selectedIds.includes(target.id);
+    if (!alreadySelected) editor.selectOne(target.id);
+
     startGesture(
-      alreadySelected ? selected : [hit],
+      alreadySelected ? selection : [target],
       point,
       canvas,
       event.pointerId,
@@ -198,7 +224,7 @@ export function CanvasStage({ editor }: CanvasStageProps) {
     canvas: HTMLCanvasElement,
     pointerId: number,
   ) => {
-    const gesture = beginGesture(elements, point, camera.zoom);
+    const gesture = beginGesture(doc, elements, point, camera.zoom);
     if (!gesture) return;
     gestureSession += 1;
     gestureRef.current = { gesture, session: `gesture-${gestureSession}` };
@@ -228,8 +254,14 @@ export function CanvasStage({ editor }: CanvasStageProps) {
       return;
     }
 
-    const changes = updateGesture(active.gesture, doc.elements, point);
-    if (changes.length > 0) editor.transform(changes, active.session);
+    const result = updateGesture(doc, active.gesture, point, {
+      zoom: camera.zoom,
+      // Alt temporarily disables snapping, as in other design tools.
+      snapping: !event.altKey,
+    });
+    if (result.changes.length > 0) {
+      editor.transform(result.changes, active.session, result.guides);
+    }
   };
 
   const updateCursor = (canvas: HTMLCanvasElement, point: Point) => {
@@ -241,21 +273,25 @@ export function CanvasStage({ editor }: CanvasStageProps) {
       canvas.style.cursor = "crosshair";
       return;
     }
-    const selected = editor.selectedElements;
+    const selection = editor.selectedElements;
     const handle =
-      selected.length === 1
-        ? hitTestHandle(selected[0], point, camera.zoom)
+      selection.length === 1
+        ? hitTestHandle(doc, selection[0], point, camera.zoom)
         : null;
     if (handle) {
       canvas.style.cursor = cursorForHandle(handle);
       return;
     }
-    canvas.style.cursor = pickElement(doc.elements, point) ? "move" : "default";
+    canvas.style.cursor = pickDeepest(doc, point, camera.zoom)
+      ? "move"
+      : "default";
   };
 
   const endInteraction = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    const hadGesture = gestureRef.current !== null;
     gestureRef.current = null;
     panRef.current = null;
+    if (hadGesture) editor.endInteraction();
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -276,20 +312,22 @@ export function CanvasStage({ editor }: CanvasStageProps) {
         onPointerCancel={endInteraction}
         onContextMenu={(event) => event.preventDefault()}
       />
-      <ViewportHint camera={camera} document={doc} size={size} />
+      <ViewportHint camera={camera} size={size} width={doc.width} height={doc.height} />
     </div>
   );
 }
 
-/** Small read-out of the document size and the document point under the centre. */
+/** Read-out of the artboard size and the document point at the viewport centre. */
 function ViewportHint({
   camera,
-  document: doc,
   size,
+  width,
+  height,
 }: {
   camera: Camera;
-  document: DesignDocument;
   size: Size;
+  width: number;
+  height: number;
 }) {
   const center = screenToDocument(
     { x: size.width / 2, y: size.height / 2 },
@@ -297,8 +335,7 @@ function ViewportHint({
   );
   return (
     <div className="pointer-events-none absolute bottom-3 right-4 rounded bg-white/80 px-2 py-1 text-xs text-zinc-600 tabular-nums">
-      {doc.width} x {doc.height} - center {Math.round(center.x)},{" "}
-      {Math.round(center.y)}
+      {width} x {height} - center {Math.round(center.x)}, {Math.round(center.y)}
     </div>
   );
 }
