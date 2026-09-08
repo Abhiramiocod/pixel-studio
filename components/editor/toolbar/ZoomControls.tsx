@@ -17,7 +17,6 @@ export function ZoomControls({
   onZoomTo,
   onZoomToFit,
 }: ZoomControlsProps) {
-  const percent = Math.round(zoom * 100);
   // The current zoom may sit between presets (wheel zoom, fit), so it is offered
   // as an extra option rather than being snapped.
   const options = ZOOM_PRESETS.includes(zoom)
@@ -64,10 +63,6 @@ export function ZoomControls({
       >
         Fit
       </button>
-
-      <span className="w-12 text-right text-xs text-zinc-500 tabular-nums">
-        {percent}%
-      </span>
     </div>
   );
 }

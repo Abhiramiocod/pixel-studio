@@ -1,26 +1,39 @@
 /**
  * Document operations - the unit of undo/redo.
  *
- * Every mutation of a `DesignDocument` is expressed as an `Operation` that can
- * be applied and inverted. History therefore stores intent (what changed), not
- * copies of the whole document.
+ * Every mutation is expressed as an `Operation` that can be applied and
+ * inverted, so history stores intent rather than copies of the document. The
+ * operations are tree-aware: inserts and removals name a parent, and an element
+ * carries its whole subtree, so grouping or deleting a group is a single
+ * reversible step.
  */
 
 import {
   applyPatch,
-  indexOfElement,
   insertElement,
+  locateElement,
   moveElementToIndex,
   removeElement,
   updateElement,
   type DesignDocument,
-  type DesignElement,
   type ElementPatch,
 } from "@/models/design";
+import type { DesignElement } from "@/models/elements";
+import type { TextStyle } from "@/models/styles";
 
 export type Operation =
-  | { kind: "insert"; index: number; element: DesignElement }
-  | { kind: "remove"; index: number; element: DesignElement }
+  | {
+      kind: "insert";
+      parentId: string | null;
+      index: number;
+      element: DesignElement;
+    }
+  | {
+      kind: "remove";
+      parentId: string | null;
+      index: number;
+      element: DesignElement;
+    }
   | { kind: "patch"; id: string; before: ElementPatch; after: ElementPatch }
   | { kind: "reorder"; id: string; from: number; to: number };
 
@@ -30,7 +43,12 @@ export function applyOperation(
 ): DesignDocument {
   switch (operation.kind) {
     case "insert":
-      return insertElement(doc, operation.element, operation.index);
+      return insertElement(
+        doc,
+        operation.parentId,
+        operation.index,
+        operation.element,
+      );
     case "remove":
       return removeElement(doc, operation.element.id);
     case "patch":
@@ -77,24 +95,62 @@ export function invertOperations(
   return [...operations].reverse().map(invertOperation);
 }
 
-const PATCH_KEYS = [
-  "x",
-  "y",
-  "width",
-  "height",
-  "rotation",
-  "opacity",
-  "fill",
-  "text",
-  "fontSize",
+const TEXT_STYLE_KEYS = [
   "fontFamily",
+  "fontSize",
+  "fontWeight",
+  "italic",
+  "underline",
   "color",
   "align",
+  "lineHeight",
+  "letterSpacing",
 ] as const;
 
+function extractTextStyle(
+  style: TextStyle,
+  template: Partial<TextStyle>,
+): Partial<TextStyle> {
+  const before: Partial<TextStyle> = {};
+  for (const key of TEXT_STYLE_KEYS) {
+    if (template[key] === undefined) continue;
+    switch (key) {
+      case "fontFamily":
+        before.fontFamily = style.fontFamily;
+        break;
+      case "fontSize":
+        before.fontSize = style.fontSize;
+        break;
+      case "fontWeight":
+        before.fontWeight = style.fontWeight;
+        break;
+      case "italic":
+        before.italic = style.italic;
+        break;
+      case "underline":
+        before.underline = style.underline;
+        break;
+      case "color":
+        before.color = style.color;
+        break;
+      case "align":
+        before.align = style.align;
+        break;
+      case "lineHeight":
+        before.lineHeight = style.lineHeight;
+        break;
+      case "letterSpacing":
+        before.letterSpacing = style.letterSpacing;
+        break;
+    }
+  }
+  return before;
+}
+
 /**
- * Reads the element's current values for exactly the keys present in `template`.
- * This is the "before" half of a patch operation.
+ * Reads the element's current values for exactly the keys present in
+ * `template` - the "before" half of a patch operation. Keys the element does
+ * not have are skipped, so patching a mixed selection stays lossless.
  */
 export function extractPatch(
   element: DesignElement,
@@ -102,50 +158,59 @@ export function extractPatch(
 ): ElementPatch {
   const before: ElementPatch = {};
 
-  for (const key of PATCH_KEYS) {
-    if (template[key] === undefined) continue;
+  if (template.name !== undefined) before.name = element.name;
+  if (template.x !== undefined) before.x = element.x;
+  if (template.y !== undefined) before.y = element.y;
+  if (template.width !== undefined) before.width = element.width;
+  if (template.height !== undefined) before.height = element.height;
+  if (template.rotation !== undefined) before.rotation = element.rotation;
+  if (template.opacity !== undefined) before.opacity = element.opacity;
+  if (template.visible !== undefined) before.visible = element.visible;
+  if (template.locked !== undefined) before.locked = element.locked;
 
-    switch (key) {
-      case "x":
-        before.x = element.x;
-        break;
-      case "y":
-        before.y = element.y;
-        break;
-      case "width":
-        before.width = element.width;
-        break;
-      case "height":
-        before.height = element.height;
-        break;
-      case "rotation":
-        before.rotation = element.rotation;
-        break;
-      case "opacity":
-        before.opacity = element.opacity;
-        break;
-      case "fill":
-        if (element.type === "rectangle") before.fill = element.fill;
-        break;
-      case "text":
-        if (element.type === "text") before.text = element.text;
-        break;
-      case "fontSize":
-        if (element.type === "text") before.fontSize = element.fontSize;
-        break;
-      case "fontFamily":
-        if (element.type === "text") before.fontFamily = element.fontFamily;
-        break;
-      case "color":
-        if (element.type === "text") before.color = element.color;
-        break;
-      case "align":
-        if (element.type === "text") before.align = element.align;
-        break;
-    }
+  if (template.fill !== undefined && "fill" in element) {
+    before.fill = element.fill;
+  }
+  if (template.border !== undefined && "border" in element) {
+    before.border = element.border;
+  }
+  if (template.shadow !== undefined && "shadow" in element) {
+    before.shadow = element.shadow;
+  }
+  if (template.geometry !== undefined && element.type === "shape") {
+    before.geometry = element.geometry;
+  }
+  if (template.cornerRadius !== undefined && "cornerRadius" in element) {
+    before.cornerRadius = element.cornerRadius;
+  }
+  if (template.text !== undefined && element.type === "text") {
+    before.text = element.text;
+  }
+  if (template.style !== undefined && element.type === "text") {
+    before.style = extractTextStyle(element.style, template.style);
+  }
+  if (template.crop !== undefined && element.type === "image") {
+    before.crop = element.crop;
+  }
+  if (template.flipX !== undefined && element.type === "image") {
+    before.flipX = element.flipX;
+  }
+  if (template.flipY !== undefined && element.type === "image") {
+    before.flipY = element.flipY;
+  }
+  if (template.clipContent !== undefined && element.type === "frame") {
+    before.clipContent = element.clipContent;
   }
 
   return before;
+}
+
+/**
+ * Both sides are produced by `extractPatch`, so their keys are inserted in the
+ * same order and a structural comparison is exact.
+ */
+function samePatch(a: ElementPatch, b: ElementPatch): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 /** Builds the patch operation for `patch`, or null when nothing would change. */
@@ -154,12 +219,12 @@ export function createPatchOperation(
   id: string,
   patch: ElementPatch,
 ): Operation | null {
-  const element = doc.elements.find((item) => item.id === id);
+  const element = locateElement(doc, id)?.element;
   if (!element) return null;
 
   const before = extractPatch(element, patch);
   const after = extractPatch(applyPatch(element, patch), patch);
-  if (PATCH_KEYS.every((key) => before[key] === after[key])) return null;
+  if (samePatch(before, after)) return null;
 
   return { kind: "patch", id, before, after };
 }
@@ -169,9 +234,24 @@ export function createReorderOperation(
   id: string,
   to: number,
 ): Operation | null {
-  const from = indexOfElement(doc, id);
-  if (from === -1 || from === to) return null;
-  return { kind: "reorder", id, from, to };
+  const location = locateElement(doc, id);
+  if (!location || location.index === to) return null;
+  return { kind: "reorder", id, from: location.index, to };
+}
+
+/** Removal operation carrying the element's subtree and position. */
+export function createRemoveOperation(
+  doc: DesignDocument,
+  id: string,
+): Operation | null {
+  const location = locateElement(doc, id);
+  if (!location) return null;
+  return {
+    kind: "remove",
+    parentId: location.parentId,
+    index: location.index,
+    element: location.element,
+  };
 }
 
 /**

@@ -36,6 +36,9 @@ export const EDITOR_SHORTCUTS: readonly ShortcutBinding[] = [
   { shortcut: { key: "z", mod: true, shift: true }, run: (e) => e.redo() },
   { shortcut: { key: "y", mod: true }, run: (e) => e.redo() },
 
+  { shortcut: { key: "g", mod: true }, run: (e) => e.group() },
+  { shortcut: { key: "g", mod: true, shift: true }, run: (e) => e.ungroup() },
+
   {
     shortcut: { key: "ArrowUp" },
     run: (e) => e.nudgeSelection(0, -NUDGE_STEP),
