@@ -1,6 +1,10 @@
 /**
- * Geometry helpers for selection, hit-testing and transforms.
+ * Geometry helpers for hit-testing and transforms.
  * Pure functions over the design model - no canvas, no React.
+ *
+ * `zoom` parameters exist so handles keep a constant *screen* size: a handle is
+ * `HANDLE_SIZE / zoom` document units across, which keeps hit areas usable at
+ * every zoom level.
  */
 
 import { MIN_ELEMENT_SIZE, type DesignElement } from "@/models/design";
@@ -11,7 +15,7 @@ export type HandleId = "nw" | "ne" | "se" | "sw" | "rotate";
 
 export const CORNER_HANDLES: readonly HandleId[] = ["nw", "ne", "se", "sw"];
 
-/** Handle box size in *screen* pixels; divided by zoom when used in design space. */
+/** Handle box size in *screen* pixels; divided by zoom when used in document space. */
 export const HANDLE_SIZE = 10;
 
 /** Distance from the top edge to the rotation handle, in screen pixels. */
@@ -53,7 +57,7 @@ export function rotatePoint(
   };
 }
 
-/** Maps a design-space point into the element's unrotated frame. */
+/** Maps a document-space point into the element's unrotated frame. */
 export function toElementLocal(element: DesignElement, point: Point): Point {
   return rotatePoint(point, elementCenter(element), -element.rotation);
 }
@@ -68,19 +72,7 @@ export function hitTestElement(element: DesignElement, point: Point): boolean {
   );
 }
 
-/** Top-most element under `point`, or null. */
-export function pickElement(
-  elements: readonly DesignElement[],
-  point: Point,
-): DesignElement | null {
-  for (let i = elements.length - 1; i >= 0; i -= 1) {
-    const element = elements[i];
-    if (hitTestElement(element, point)) return element;
-  }
-  return null;
-}
-
-/** The four corners of the rotated bounding box, in design space. */
+/** The four corners of the rotated bounding box, in document space. */
 export function cornerPoints(element: DesignElement): Record<
   "nw" | "ne" | "se" | "sw",
   Point
@@ -163,7 +155,7 @@ export interface Rect {
 
 /**
  * Resizes by dragging a corner handle to `point`, keeping the opposite corner
- * fixed in design space and respecting the element's rotation.
+ * fixed in document space and respecting the element's rotation.
  */
 export function resizeElement(
   element: DesignElement,
@@ -179,7 +171,7 @@ export function resizeElement(
   const width = Math.max(MIN_ELEMENT_SIZE, signX * (local.x - anchor.x));
   const height = Math.max(MIN_ELEMENT_SIZE, signY * (local.y - anchor.y));
 
-  // The new centre is half a diagonal away from the anchor, back in design space.
+  // The new centre is half a diagonal away from the anchor, back in document space.
   const center = rotatePoint(
     {
       x: anchor.x + (signX * width) / 2,

@@ -181,6 +181,74 @@ export function addElement(
   return { ...doc, elements: [...doc.elements, element] };
 }
 
+/** Inserts at a specific z-index; used when undoing a delete. */
+export function insertElement(
+  doc: DesignDocument,
+  element: DesignElement,
+  index: number,
+): DesignDocument {
+  const elements = [...doc.elements];
+  elements.splice(Math.min(Math.max(index, 0), elements.length), 0, element);
+  return { ...doc, elements };
+}
+
+export function indexOfElement(doc: DesignDocument, id: string): number {
+  return doc.elements.findIndex((element) => element.id === id);
+}
+
+/** Moves an element to a new z-index. Index 0 is the back of the stack. */
+export function moveElementToIndex(
+  doc: DesignDocument,
+  id: string,
+  index: number,
+): DesignDocument {
+  const from = indexOfElement(doc, id);
+  if (from === -1) return doc;
+  const elements = [...doc.elements];
+  const [element] = elements.splice(from, 1);
+  elements.splice(Math.min(Math.max(index, 0), elements.length), 0, element);
+  return { ...doc, elements };
+}
+
+export type LayerDirection = "forward" | "backward" | "front" | "back";
+
+/** Target index for a layer command, or the current index when it is a no-op. */
+export function targetLayerIndex(
+  current: number,
+  count: number,
+  direction: LayerDirection,
+): number {
+  switch (direction) {
+    case "forward":
+      return Math.min(count - 1, current + 1);
+    case "backward":
+      return Math.max(0, current - 1);
+    case "front":
+      return count - 1;
+    case "back":
+      return 0;
+  }
+}
+
+/** Copy of `element` with a fresh id, offset so it does not hide the original. */
+export function cloneElement(
+  element: DesignElement,
+  offset: number,
+): DesignElement {
+  const prefix = element.type === "text" ? "text" : "rect";
+  return {
+    ...element,
+    id: createId(prefix),
+    x: element.x + offset,
+    y: element.y + offset,
+  };
+}
+
+/** Label shown in the layers panel. */
+export function elementLabel(element: DesignElement): string {
+  return element.type === "text" ? element.text || "Text" : "Rectangle";
+}
+
 export function updateElement(
   doc: DesignDocument,
   id: string,

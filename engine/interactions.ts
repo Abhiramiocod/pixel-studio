@@ -1,9 +1,9 @@
 /**
  * Pointer gestures on the canvas.
  *
- * A gesture is started once (`beginGesture`) and then asked for a patch on every
- * pointer move (`updateGesture`). Keeping this outside the React components means
- * drag/resize/rotate behaviour is testable and reusable.
+ * A gesture is created once on pointer down (`beginGesture`) and asked for the
+ * element changes it implies on every pointer move (`updateGesture`). All maths
+ * happens in document space, so gestures behave identically at any zoom or pan.
  */
 
 import type { DesignElement, ElementPatch } from "@/models/design";
@@ -16,14 +16,18 @@ import {
   type HandleId,
 } from "@/engine/transformations";
 
+export interface ElementChange {
+  id: string;
+  patch: ElementPatch;
+}
+
 export type Gesture =
   | {
       kind: "move";
-      elementId: string;
-      /** Pointer position at gesture start, in design space. */
+      /** Pointer position at gesture start, in document space. */
       origin: Point;
-      startX: number;
-      startY: number;
+      /** Start positions of every element being moved. */
+      starts: ReadonlyArray<{ id: string; x: number; y: number }>;
     }
   | {
       kind: "resize";
@@ -38,55 +42,80 @@ export type Gesture =
     };
 
 /**
- * Decides which gesture a press on `element` starts. Handles win over the body,
- * so a press near a corner resizes rather than moves.
+ * Decides which gesture a press starts. Handles on the sole selected element
+ * win over the element body, so a press near a corner resizes rather than moves.
+ * Resize and rotate apply to a single element only; moving supports many.
  */
 export function beginGesture(
-  element: DesignElement,
+  elements: readonly DesignElement[],
   point: Point,
   zoom: number,
-): Gesture {
-  const handle = hitTestHandle(element, point, zoom);
+): Gesture | null {
+  if (elements.length === 0) return null;
 
-  if (handle === "rotate") {
-    return {
-      kind: "rotate",
-      elementId: element.id,
-      angleOffset: pointerAngle(element, point) - element.rotation,
-    };
-  }
+  if (elements.length === 1) {
+    const element = elements[0];
+    const handle = hitTestHandle(element, point, zoom);
 
-  if (handle !== null) {
-    return { kind: "resize", elementId: element.id, handle };
+    if (handle === "rotate") {
+      return {
+        kind: "rotate",
+        elementId: element.id,
+        angleOffset: pointerAngle(element, point) - element.rotation,
+      };
+    }
+    if (handle !== null) {
+      return { kind: "resize", elementId: element.id, handle };
+    }
   }
 
   return {
     kind: "move",
-    elementId: element.id,
     origin: point,
-    startX: element.x,
-    startY: element.y,
+    starts: elements.map((element) => ({
+      id: element.id,
+      x: element.x,
+      y: element.y,
+    })),
   };
 }
 
-/** The patch this gesture implies for the current pointer position. */
+/** The element changes this gesture implies for the current pointer position. */
 export function updateGesture(
   gesture: Gesture,
-  element: DesignElement,
+  elements: readonly DesignElement[],
   point: Point,
-): ElementPatch {
+): ElementChange[] {
   switch (gesture.kind) {
-    case "move":
-      return {
-        x: gesture.startX + (point.x - gesture.origin.x),
-        y: gesture.startY + (point.y - gesture.origin.y),
-      };
-    case "resize":
-      return resizeElement(element, gesture.handle, point);
-    case "rotate":
-      return {
-        rotation: normalizeAngle(pointerAngle(element, point) - gesture.angleOffset),
-      };
+    case "move": {
+      const dx = point.x - gesture.origin.x;
+      const dy = point.y - gesture.origin.y;
+      return gesture.starts.map((start) => ({
+        id: start.id,
+        patch: { x: start.x + dx, y: start.y + dy },
+      }));
+    }
+    case "resize": {
+      const element = elements.find((item) => item.id === gesture.elementId);
+      if (!element) return [];
+      return [
+        { id: element.id, patch: resizeElement(element, gesture.handle, point) },
+      ];
+    }
+    case "rotate": {
+      const element = elements.find((item) => item.id === gesture.elementId);
+      if (!element) return [];
+      return [
+        {
+          id: element.id,
+          patch: {
+            rotation: normalizeAngle(
+              pointerAngle(element, point) - gesture.angleOffset,
+            ),
+          },
+        },
+      ];
+    }
   }
 }
 

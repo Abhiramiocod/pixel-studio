@@ -1,6 +1,7 @@
 "use client";
 
 import type { Tool } from "@/editor/state";
+import { formatShortcut } from "@/utils/keyboard";
 
 interface ToolbarProps {
   tool: Tool;
@@ -48,8 +49,18 @@ export function Toolbar({
       </div>
 
       <div className="ml-auto flex items-center gap-1">
-        <ToolbarButton label="Undo" disabled={!canUndo} onClick={onUndo} />
-        <ToolbarButton label="Redo" disabled={!canRedo} onClick={onRedo} />
+        <ToolbarButton
+          label="Undo"
+          title={`Undo (${formatShortcut({ key: "z", mod: true })})`}
+          disabled={!canUndo}
+          onClick={onUndo}
+        />
+        <ToolbarButton
+          label="Redo"
+          title={`Redo (${formatShortcut({ key: "z", mod: true, shift: true })})`}
+          disabled={!canRedo}
+          onClick={onRedo}
+        />
       </div>
     </header>
   );
@@ -57,16 +68,19 @@ export function Toolbar({
 
 function ToolbarButton({
   label,
+  title,
   disabled,
   onClick,
 }: {
   label: string;
+  title: string;
   disabled: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
+      title={title}
       onClick={onClick}
       disabled={disabled}
       className="rounded px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-300 disabled:hover:bg-transparent"

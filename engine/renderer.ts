@@ -1,13 +1,20 @@
 /**
  * Canvas rendering.
  *
- * The renderer is a pure function of (document, selection, viewport): it never
- * reads React state and never mutates the model. Everything is drawn in design
- * coordinates; the viewport transform maps that onto the canvas.
+ * The renderer is a pure function of (document, selection, camera): it never
+ * reads React state and never mutates the model. Elements are drawn in document
+ * coordinates under the camera transform; selection chrome is drawn afterwards
+ * in screen space so outlines and handles keep a constant size at any zoom.
  */
 
 import type { DesignDocument, DesignElement } from "@/models/design";
-import { designToScreen, type Size, type Viewport } from "@/engine/coordinates";
+import {
+  documentToScreen,
+  type Camera,
+  type Point,
+  type Size,
+} from "@/engine/coordinates";
+import { selectionBounds } from "@/engine/selection";
 import {
   CORNER_HANDLES,
   HANDLE_SIZE,
@@ -18,12 +25,13 @@ import {
 
 const WORKSPACE_BACKGROUND = "#e5e7eb";
 const SELECTION_COLOR = "#2563eb";
+const MULTI_SELECTION_COLOR = "#93c5fd";
 const HANDLE_FILL = "#ffffff";
 
 export interface RenderScene {
   document: DesignDocument;
-  selectedId: string | null;
-  viewport: Viewport;
+  selectedIds: readonly string[];
+  camera: Camera;
   /** Canvas size in CSS pixels. */
   size: Size;
   devicePixelRatio: number;
@@ -33,7 +41,7 @@ export function renderScene(
   ctx: CanvasRenderingContext2D,
   scene: RenderScene,
 ): void {
-  const { document: doc, viewport, size, devicePixelRatio } = scene;
+  const { document: doc, camera, size, devicePixelRatio } = scene;
 
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
   ctx.clearRect(0, 0, size.width, size.height);
@@ -41,8 +49,8 @@ export function renderScene(
   ctx.fillRect(0, 0, size.width, size.height);
 
   ctx.save();
-  ctx.translate(viewport.offsetX, viewport.offsetY);
-  ctx.scale(viewport.zoom, viewport.zoom);
+  ctx.translate(camera.panX, camera.panY);
+  ctx.scale(camera.zoom, camera.zoom);
 
   drawArtboard(ctx, doc);
   ctx.save();
@@ -53,15 +61,9 @@ export function renderScene(
     drawElement(ctx, element);
   }
   ctx.restore();
-
   ctx.restore();
 
-  const selected = doc.elements.find(
-    (element) => element.id === scene.selectedId,
-  );
-  if (selected) {
-    drawSelection(ctx, selected, viewport);
-  }
+  drawSelection(ctx, scene);
 }
 
 function drawArtboard(
@@ -122,29 +124,43 @@ function drawElement(
   });
 }
 
-/**
- * Selection chrome is drawn in screen space so outlines and handles keep a
- * constant size regardless of zoom.
- */
 function drawSelection(
   ctx: CanvasRenderingContext2D,
-  element: DesignElement,
-  viewport: Viewport,
+  scene: RenderScene,
 ): void {
-  const positions = handlePositions(element, viewport.zoom);
-  const corners = CORNER_HANDLES.filter((id) => id !== "rotate").map((id) =>
-    designToScreen(positions[id], viewport),
+  const selected = scene.document.elements.filter((element) =>
+    scene.selectedIds.includes(element.id),
   );
-  const rotate = designToScreen(positions.rotate, viewport);
-  const topEdgeMid = {
-    x: (corners[0].x + corners[1].x) / 2,
-    y: (corners[0].y + corners[1].y) / 2,
-  };
+  if (selected.length === 0) return;
 
   ctx.save();
   ctx.strokeStyle = SELECTION_COLOR;
   ctx.lineWidth = 1.5;
 
+  for (const element of selected) {
+    drawElementOutline(ctx, element, scene.camera);
+  }
+
+  if (selected.length === 1) {
+    drawTransformHandles(ctx, selected[0], scene.camera);
+  } else {
+    drawGroupBounds(ctx, selected, scene.camera);
+  }
+
+  ctx.restore();
+}
+
+function outlineCorners(element: DesignElement, camera: Camera): Point[] {
+  const positions = handlePositions(element, camera.zoom);
+  return CORNER_HANDLES.map((id) => documentToScreen(positions[id], camera));
+}
+
+function drawElementOutline(
+  ctx: CanvasRenderingContext2D,
+  element: DesignElement,
+  camera: Camera,
+): void {
+  const corners = outlineCorners(element, camera);
   ctx.beginPath();
   ctx.moveTo(corners[0].x, corners[0].y);
   for (let i = 1; i < corners.length; i += 1) {
@@ -152,6 +168,22 @@ function drawSelection(
   }
   ctx.closePath();
   ctx.stroke();
+}
+
+function drawTransformHandles(
+  ctx: CanvasRenderingContext2D,
+  element: DesignElement,
+  camera: Camera,
+): void {
+  const corners = outlineCorners(element, camera);
+  const rotate = documentToScreen(
+    handlePositions(element, camera.zoom).rotate,
+    camera,
+  );
+  const topEdgeMid = {
+    x: (corners[0].x + corners[1].x) / 2,
+    y: (corners[0].y + corners[1].y) / 2,
+  };
 
   ctx.beginPath();
   ctx.moveTo(topEdgeMid.x, topEdgeMid.y);
@@ -167,14 +199,31 @@ function drawSelection(
   ctx.arc(rotate.x, rotate.y, HANDLE_SIZE / 2, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
+}
 
+/** Dashed axis-aligned box around a multi-element selection. */
+function drawGroupBounds(
+  ctx: CanvasRenderingContext2D,
+  elements: readonly DesignElement[],
+  camera: Camera,
+): void {
+  const bounds = selectionBounds(elements);
+  if (!bounds) return;
+
+  const topLeft = documentToScreen(bounds, camera);
+  ctx.save();
+  ctx.strokeStyle = MULTI_SELECTION_COLOR;
+  ctx.setLineDash([4, 4]);
+  ctx.strokeRect(
+    topLeft.x,
+    topLeft.y,
+    bounds.width * camera.zoom,
+    bounds.height * camera.zoom,
+  );
   ctx.restore();
 }
 
-function drawHandleBox(
-  ctx: CanvasRenderingContext2D,
-  point: { x: number; y: number },
-): void {
+function drawHandleBox(ctx: CanvasRenderingContext2D, point: Point): void {
   const half = HANDLE_SIZE / 2;
   ctx.fillStyle = HANDLE_FILL;
   ctx.fillRect(point.x - half, point.y - half, HANDLE_SIZE, HANDLE_SIZE);
